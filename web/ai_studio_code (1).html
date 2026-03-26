@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Goofy Tennis Flick Master</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #222; font-family: 'Courier New', Courier, monospace; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; pointer-events: none; z-index: 10; }
+        #score-val { font-size: 60px; font-weight: bold; color: #ccff00; text-shadow: 3px 3px 0px #000; }
+        #msg { font-size: 18px; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div id="score-val">0</div>
+        <div id="msg">CLICK TO MOVE & HIT ITEMS!</div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.162.0/build/three.module.js",
+                "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/+esm"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import * as CANNON from 'cannon-es';
+
+        // --- Game Logic Constants ---
+        const CLEANUP_TIME = 120000; // 2 minutes
+        const SPAWN_INTERVAL = 1000;
+        const PLAYER_SPEED = 8;
+        
+        let score = 0;
+        const gameObjects = [];
+        const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -15, 0) });
+        const scene = new THREE.Scene();
+        const clock = new THREE.Clock();
+        
+        // --- Renderer Setup ---
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 15, 20);
+        camera.lookAt(0, 0, 0);
+
+        // --- Lighting ---
+        scene.background = new THREE.Color(0x4488ff);
+        const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambient);
+        const sun = new THREE.DirectionalLight(0xffffff, 1);
+        sun.position.set(10, 20, 10);
+        sun.castShadow = true;
+        sun.shadow.mapSize.set(1024, 1024);
+        scene.add(sun);
+
+        // --- Tennis Court Floor ---
+        const createCourtTexture = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#2e8b57';
+            ctx.fillRect(0,0,512,512);
+            ctx.strokeStyle = 'white';
+            ctx.lineWidth = 10;
+            ctx.strokeRect(20, 20, 472, 472);
+            ctx.beginPath();
+            ctx.moveTo(256, 20); ctx.lineTo(256, 492);
+            ctx.moveTo(20, 256); ctx.lineTo(492, 256);
+            ctx.stroke();
+            return new THREE.CanvasTexture(canvas);
+        };
+
+        const groundMat = new THREE.MeshStandardMaterial({ map: createCourtTexture() });
+        const groundGeo = new THREE.PlaneGeometry(40, 40);
+        const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.receiveShadow = true;
+        scene.add(groundMesh);
+
+        const groundBody = new CANNON.Body({ mass: 0, shape: new CANNON.Plane() });
+        groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        world.addBody(groundBody);
+
+        // --- Humanoid Character ---
+        class Player {
+            constructor() {
+                this.group = new THREE.Group();
+                const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffcc00 });
+                
+                // Torso
+                this.body = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.2, 0.5), bodyMat);
+                this.body.position.y = 1.6;
+                this.group.add(this.body);
+
+                // Head
+                this.head = new THREE.Mesh(new THREE.SphereGeometry(0.4), bodyMat);
+                this.head.position.y = 2.5;
+                this.group.add(this.head);
+
+                // Limbs
+                const limbGeo = new THREE.BoxGeometry(0.2, 0.8, 0.2);
+                this.lLeg = new THREE.Mesh(limbGeo, bodyMat);
+                this.rLeg = new THREE.Mesh(limbGeo, bodyMat);
+                this.lArm = new THREE.Mesh(limbGeo, bodyMat);
+                this.rArm = new THREE.Mesh(limbGeo, bodyMat);
+                
+                this.lLeg.position.set(-0.3, 0.6, 0);
+                this.rLeg.position.set(0.3, 0.6, 0);
+                this.lArm.position.set(-0.6, 1.8, 0);
+                this.rArm.position.set(0.6, 1.8, 0);
+                
+                this.group.add(this.lLeg, this.rLeg, this.lArm, this.rArm);
+
+                // Racket
+                this.racket = new THREE.Group();
+                const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1), new THREE.MeshStandardMaterial({color: 0x555}));
+                const frame = new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.05, 8, 16), new THREE.MeshStandardMaterial({color: 0xff0000}));
+                frame.position.y = 0.8;
+                this.racket.add(handle, frame);
+                this.racket.position.set(0.6, 1.8, 0.5);
+                this.racket.rotation.x = Math.PI/2;
+                this.group.add(this.racket);
+
+                scene.add(this.group);
+
+                // Physics Body (Sphere at feet to climb piles)
+                this.physBody = new CANNON.Body({
+                    mass: 5,
+                    shape: new CANNON.Sphere(0.6),
+                    fixedRotation: true,
+                    position: new CANNON.Vec3(0, 2, 0)
+                });
+                world.addBody(this.physBody);
+
+                this.target = new THREE.Vector3(0, 0, 0);
+                this.isMoving = false;
+                this.state = 'idle';
+                this.idleTimer = 0;
+            }
+
+            update(dt) {
+                const pos = this.physBody.position;
+                const dist = new THREE.Vector2(pos.x, pos.z).distanceTo(new THREE.Vector2(this.target.x, this.target.z));
+
+                if (dist > 0.5) {
+                    this.isMoving = true;
+                    const dir = new THREE.Vector3().subVectors(this.target, new THREE.Vector3(pos.x, 0, pos.z)).normalize();
+                    this.physBody.velocity.x = dir.x * PLAYER_SPEED;
+                    this.physBody.velocity.z = dir.z * PLAYER_SPEED;
+                    
+                    // Look at direction
+                    const angle = Math.atan2(dir.x, dir.z);
+                    this.group.rotation.y = angle;
+
+                    // Goofy walk anim
+                    const t = Date.now() * 0.01;
+                    this.lLeg.rotation.x = Math.sin(t) * 0.8;
+                    this.rLeg.rotation.x = -Math.sin(t) * 0.8;
+                    this.lArm.rotation.x = -Math.sin(t) * 0.8;
+                    this.rArm.rotation.x = Math.sin(t) * 0.8;
+                    this.body.position.y = 1.6 + Math.abs(Math.cos(t)) * 0.2;
+                } else {
+                    this.isMoving = false;
+                    this.physBody.velocity.x *= 0.9;
+                    this.physBody.velocity.z *= 0.9;
+                    this.animateIdle(dt);
+                }
+
+                this.group.position.copy(pos);
+                this.group.position.y -= 0.6; // Offset from sphere center
+            }
+
+            animateIdle(dt) {
+                this.idleTimer += dt;
+                const t = Date.now() * 0.002;
+                if (this.idleTimer > 3) { // Random pose logic
+                    this.lArm.rotation.z = Math.sin(t) * 0.5;
+                    this.rArm.rotation.z = -Math.sin(t) * 0.5;
+                }
+                this.lLeg.rotation.x *= 0.9;
+                this.rLeg.rotation.x *= 0.9;
+            }
+
+            swing() {
+                const swingTween = { val: 0 };
+                const originalRot = this.racket.rotation.x;
+                const tl = Date.now();
+                // Hit check near player
+                gameObjects.forEach(obj => {
+                    const d = obj.mesh.position.distanceTo(this.group.position);
+                    if (d < 3) {
+                        const force = new CANNON.Vec3(
+                            (obj.mesh.position.x - this.group.position.x) * 10,
+                            15,
+                            (obj.mesh.position.z - this.group.position.z) * 10
+                        );
+                        obj.body.applyImpulse(force, obj.body.position);
+                        if (!obj.hit) {
+                            obj.hit = true;
+                            if (obj.isPoop) updateScore(-3);
+                            else updateScore(1);
+                        }
+                    }
+                });
+                // Visual swing
+                this.racket.rotation.x -= 1.5;
+                setTimeout(() => { this.racket.rotation.x = originalRot; }, 200);
+            }
+        }
+
+        const player = new Player();
+
+        // --- Interaction ---
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        window.addEventListener('mousedown', (e) => {
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(groundMesh);
+            if (intersects.length > 0) {
+                player.target.copy(intersects[0].point);
+                player.swing();
+            }
+        });
+
+        function updateScore(v) {
+            score += v;
+            document.getElementById('score-val').innerText = score;
+        }
+
+        // --- Object Spawning ---
+        const types = [
+            { name: 'soccer', color: 0xffffff, shape: 'sphere', size: 0.5 },
+            { name: 'baseball', color: 0xdddddd, shape: 'sphere', size: 0.2 },
+            { name: 'anvil', color: 0x333333, shape: 'box', size: [1, 0.6, 0.6] },
+            { name: 'book', color: 0x654321, shape: 'box', size: [0.6, 0.1, 0.8] },
+            { name: 'poop', color: 0x8B4513, shape: 'sphere', size: 0.5, isPoop: true },
+            { name: 'airplane', color: 0xff0000, shape: 'box', size: [1.2, 0.2, 0.2] },
+            { name: 'gold', color: 0xffd700, shape: 'box', size: [0.8, 0.3, 0.3] },
+            { name: 'crate', color: 0x8b4513, shape: 'box', size: [0.7, 0.7, 0.7] },
+            { name: 'pill', color: 0x00ff00, shape: 'sphere', size: 0.4 },
+            { name: 'brick', color: 0xaa4444, shape: 'box', size: [0.8, 0.4, 0.4] }
+        ];
+
+        function spawn() {
+            const config = types[Math.floor(Math.random() * types.length)];
+            let geo, shape;
+            
+            if (config.shape === 'sphere') {
+                geo = new THREE.SphereGeometry(config.size);
+                shape = new CANNON.Sphere(config.size);
+            } else {
+                geo = new THREE.BoxGeometry(...config.size);
+                shape = new CANNON.Box(new CANNON.Vec3(config.size[0]/2, config.size[1]/2, config.size[2]/2));
+            }
+
+            const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: config.color }));
+            mesh.castShadow = true;
+            scene.add(mesh);
+
+            const body = new CANNON.Body({
+                mass: config.name === 'anvil' ? 10 : 1,
+                shape: shape,
+                position: new CANNON.Vec3(Math.random() * 20 - 10, 15, Math.random() * 20 - 10)
+            });
+            world.addBody(body);
+
+            gameObjects.push({ 
+                mesh, body, 
+                isPoop: !!config.isPoop, 
+                hit: false, 
+                spawnTime: Date.now() 
+            });
+        }
+
+        // --- Main Loop ---
+        let lastSpawn = 0;
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            world.step(1/60);
+
+            player.update(dt);
+
+            if (Date.now() - lastSpawn > SPAWN_INTERVAL) {
+                spawn();
+                lastSpawn = Date.now();
+            }
+
+            for (let i = gameObjects.length - 1; i >= 0; i--) {
+                const obj = gameObjects[i];
+                obj.mesh.position.copy(obj.body.position);
+                obj.mesh.quaternion.copy(obj.body.quaternion);
+
+                // Cleanup after 2 mins or if fell off
+                if (Date.now() - obj.spawnTime > CLEANUP_TIME || obj.body.position.y < -10) {
+                    scene.remove(obj.mesh);
+                    world.removeBody(obj.body);
+                    gameObjects.splice(i, 1);
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
