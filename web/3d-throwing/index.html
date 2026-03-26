@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Throwing Game</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            border: 1px solid #000;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let throwing = false;
+
+        // Game logic goes here
+        function startGame() {
+            // Initialize game
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'green';
+            ctx.fillRect(100, 100, 50, 50);
+        }
+
+        function throwObject() {
+            // Logic for throwing the object
+            throwing = true;
+            // Example animation
+            let xPos = 100;
+            const interval = setInterval(() => {
+                if (xPos < canvas.width) {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.fillStyle = 'green';
+                    ctx.fillRect(xPos, 100, 50, 50);
+                    xPos += 5;
+                } else {
+                    clearInterval(interval);
+                    throwing = false;
+                }
+            }, 100);
+        }
+
+        canvas.addEventListener('click', () => {
+            if (!throwing) {
+                throwObject();
+            }
+        });
+
+        startGame();
+    </script>
+</body>
+</html>
